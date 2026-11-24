@@ -1,0 +1,23 @@
+CREATE TABLE IF NOT EXISTS surge_responses (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    task_id INT NOT NULL,
+    status ENUM('planned','active','resolved','cancelled') NOT NULL DEFAULT 'planned',
+    response_mode ENUM('meter_entry','stagger_pickup') NOT NULL,
+    baseline_queue DECIMAL(5,1) NOT NULL,
+    reported_queue SMALLINT UNSIGNED NOT NULL CHECK (reported_queue <= 300),
+    release_limit SMALLINT UNSIGNED NOT NULL,
+    release_queue SMALLINT UNSIGNED CHECK (release_queue <= 300),
+    plan_note VARCHAR(200) NOT NULL,
+    outcome_note VARCHAR(200),
+    opened_by INT NOT NULL,
+    activated_by INT,
+    ended_by INT,
+    opened_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    activated_at DATETIME,
+    ended_at DATETIME,
+    KEY surge_by_task_status (task_id,status),
+    FOREIGN KEY (task_id) REFERENCES dispatch_tasks(id),
+    FOREIGN KEY (opened_by) REFERENCES users(id),
+    FOREIGN KEY (activated_by) REFERENCES users(id),
+    FOREIGN KEY (ended_by) REFERENCES users(id)
+) ENGINE=InnoDB;

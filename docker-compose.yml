@@ -1,0 +1,72 @@
+name: mall-queue-segments
+x-python: &python
+  build: ./backend
+  image: mall-queue-segments-python:local
+  environment:
+    MYSQL_PASSWORD: ${MYSQL_PASSWORD:-mall-db-local}
+    JWT_SECRET: ${JWT_SECRET:-mall-queue-segments-demo-key-change-before-deploy}
+    SEED_DEMO: ${SEED_DEMO:-true}
+  volumes: [runtime:/runtime]
+  depends_on:
+    db: {condition: service_healthy}
+    redis: {condition: service_healthy}
+services:
+  db:
+    image: mysql:8.0
+    container_name: ${COMPOSE_PROJECT_NAME:-mall-queue-segments}-db
+    environment:
+      MYSQL_DATABASE: queue_ops
+      MYSQL_USER: queue_ops
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-mall-db-local}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-mall-root-local}
+    ports: ["127.0.0.1:${DB_PORT:-17751}:3306"]
+    volumes:
+      - mysql:/var/lib/mysql
+      - ./backend/migrations/001_queue.sql:/docker-entrypoint-initdb.d/001_queue.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$$MYSQL_PASSWORD" mysql --protocol=TCP -h 127.0.0.1 -u queue_ops queue_ops -e "SELECT id FROM floor_hours LIMIT 1"']
+      interval: 3s
+      timeout: 3s
+      retries: 35
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-mall-queue-segments}-redis
+    volumes: [redis:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  backend:
+    <<: *python
+    container_name: ${COMPOSE_PROJECT_NAME:-mall-queue-segments}-backend
+    ports: ["127.0.0.1:${BACKEND_PORT:-19251}:8000"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 25
+  worker:
+    <<: *python
+    container_name: ${COMPOSE_PROJECT_NAME:-mall-queue-segments}-worker
+    command: [python, -m, src.worker]
+    healthcheck:
+      test: [CMD, python, -c, "from pathlib import Path; import time; assert time.time()-Path('/runtime/worker.tick').stat().st_mtime < 15"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  frontend:
+    build: ./frontend
+    container_name: ${COMPOSE_PROJECT_NAME:-mall-queue-segments}-frontend
+    ports: ["127.0.0.1:${FRONTEND_PORT:-18251}:80"]
+    depends_on:
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, wget, -qO-, 'http://127.0.0.1/api/health']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+volumes:
+  mysql:
+  redis:
+  runtime:
