@@ -1,5 +1,6 @@
 from fastapi import HTTPException
 
+from .relocation import location_at, roster
 from .storage import audit
 
 MIN_WINDOWS = 3
@@ -10,11 +11,15 @@ def hour_overview(cur, query):
     hour = cur.fetchone()
     hour_id = hour['id'] if hour else None
     status = hour['status'] if hour else 'collecting'
+    members = roster(cur, query.floor, query.hour_start)
+    if not members:
+        return {'hour_status': status, 'stores': []}
+    marks = ','.join(['%s'] * len(members))
     cur.execute('SELECT s.id,s.code,s.name,c.id AS order_id,c.status AS order_status,c.waiver_reason, '
                 'o.window_start FROM stores s LEFT JOIN coverage_orders c ON c.store_id=s.id AND c.hour_id=%s '
-                'LEFT JOIN observations o ON o.store_id=s.id AND o.hour_id=%s WHERE s.floor=%s '
+                f'LEFT JOIN observations o ON o.store_id=s.id AND o.hour_id=%s WHERE s.id IN ({marks}) '
                 "AND (%s='collecting' OR EXISTS (SELECT 1 FROM analysis_points p WHERE p.store_id=s.id AND p.hour_id=%s)) "
-                'ORDER BY s.code,o.window_start', (hour_id, hour_id, query.floor, status, hour_id))
+                'ORDER BY s.code,o.window_start', (hour_id, hour_id, *members, status, hour_id))
     stores = {}
     for row in cur.fetchall():
         windows = stores.setdefault(row['id'], row | {'recorded_minutes': []})['recorded_minutes']
@@ -27,12 +32,17 @@ def hour_overview(cur, query):
     return {'hour_status': status, 'stores': list(stores.values())}
 
 
-def open_order(cur, hour, data, actor):
-    if hour['status'] != 'collecting':
-        raise HTTPException(409, '只能给尚未封存的小时安排补采')
-    cur.execute('SELECT id FROM stores WHERE id=%s AND floor=%s', (data.store_id, data.floor))
+def open_order(cur, data, actor):
+    # Lock the store before the floor hour, matching the sampling and relocation order.
+    cur.execute('SELECT id FROM stores WHERE id=%s FOR UPDATE', (data.store_id,))
     if not cur.fetchone():
         raise HTTPException(404, '该楼层没有此门店')
+    if location_at(cur, data.store_id, data.hour_start)['floor'] != data.floor:
+        raise HTTPException(404, '该楼层没有此门店')
+    from .shift import lock_hour  # Deferred: shift imports this module.
+    hour = lock_hour(cur, data.floor, data.hour_start)
+    if hour['status'] != 'collecting':
+        raise HTTPException(409, '只能给尚未封存的小时安排补采')
     cur.execute('SELECT COUNT(*) AS total FROM observations WHERE hour_id=%s AND store_id=%s', (hour['id'], data.store_id))
     if cur.fetchone()['total'] >= MIN_WINDOWS:
         raise HTTPException(409, '该门店已达到三个观测窗口')

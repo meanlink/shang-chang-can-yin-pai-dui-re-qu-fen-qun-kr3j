@@ -6,7 +6,6 @@ from . import coverage, handoffs, lanes
 from .contracts import FloorHourInput, Role
 from .extension_contracts import BookingEnd, BookingInput, CoverageOrderInput, HandoffInput, LaneInput, LoadInput, Note
 from .security import authenticate, permit
-from .shift import lock_hour
 from .storage import transaction
 
 router = APIRouter()
@@ -25,8 +24,7 @@ def get_coverage(query: Hour, _user=Depends(authenticate)):
 @router.post('/coverage', status_code=201)
 def create_coverage(data: CoverageOrderInput, user=Depends(operator)):
     with transaction() as cur:
-        hour = lock_hour(cur, data.floor, data.hour_start)
-        return coverage.open_order(cur, hour, data, user['id'])
+        return coverage.open_order(cur, data, user['id'])
 
 
 @router.post('/coverage/{key}/waive')

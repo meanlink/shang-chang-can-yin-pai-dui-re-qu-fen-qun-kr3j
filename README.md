@@ -16,7 +16,7 @@ docker compose up -d --build --wait
 | 演示账号 | 角色 | 工作页面和操作 |
 |---|---|---|
 | `patrol` | `observer` 巡场采样 | 选择门店和窗口，提交排队人数，按补采清单补录 |
-| `floorlead` | `operator` 楼层运营 | 登记门店、下发补采、封存热区、分配等候线、安排控流、立单和核准服务恢复、发布交接简报 |
+| `floorlead` | `operator` 楼层运营 | 登记门店和快闪搬迁、下发补采、封存热区、分配等候线、安排控流、立单和核准服务恢复、发布交接简报 |
 | `guide` | `steward` 现场疏导 | 认领疏导单，登记入线及释放，执行控流并复测解除，记录门店措施和后续复查，完成疏导和签收简报 |
 
 三个演示账号的口令都是 `changhe-demo`。三个角色可读全部业务页面，写操作按岗位授权。账号只用于本地演示。
@@ -51,6 +51,13 @@ docker compose up -d --build --wait
 
 控流状态 `planned / active / resolved / cancelled` 定义于 `003_surge_response.sql`，规则见 `surge.py`、`surge_policy.py`，显示见 `surges.js` 与 `handoffs.js`。恢复状态 `open / monitoring / closed` 定义于 `004_tenant_recovery.sql`，规则见 `recovery.py`、`recovery_checks.py`，显示见 `recoveries.js`、`recovery-evidence.js` 与 `handoffs.js`。`peak_routes.py` 和 `peak_contracts.py` 提供 API 与输入校验。控流方式 `meter_entry / stagger_pickup` 在迁移、`SurgePlan` 和 `surges.js` 中定义。
 
+## 快闪店临时搬迁
+
+1. 楼层运营在「门店档案」为快闪店登记搬迁：生效整点、新楼层、新坐标和新疏导点。seed 已为晴茶快闪登记 2026 年 11 月 21 日 14:00 起迁至 2F `(44,30)`，疏导点为二层南梯黄线。
+2. 观测按实测时刻所在楼层归属：14:00 前的窗口仍归三层，14:00 起归二层。迟到补录的观测同样归实测时所在楼层，与提交时间无关。
+3. 登记搬迁时，若生效整点到下一条搬迁之间已有该店观测或补采任务，或新旧楼层在该区间的任一小时已脱离采集（计算中、已封存或计算失败），搬迁会被退回。搬迁与补采、采样或封存同时提交时按同一规则判定：门店行锁串行化采样和补采，楼层小时行锁串行化封存。
+4. 封存名册按观测小时生效的楼层位置生成。分析失败重试仍用封存时的坐标；之后确认热区也按封存时的疏导点派单。搬迁登记不可改不可删，历史位置始终可重现。
+
 ## DBSCAN 口径
 
 固定观察单位是一个楼层小时，最多 4 个按 15 分钟对齐的窗口。门店至少要有 3 个观测，且排队人数中位数达到 8 人，才参与 DBSCAN。以同层排队入口的米制坐标计算欧氏距离，`eps=18m`、`minPts=3`，邻居计入自身。核心点可以扩展邻域，边界点加入群但不扩展，符合拥堵和样本门槛却未分入群的点为噪声。样本不足者只在排除清单中出现，达样本数但低于拥堵门槛者显示为低于阈值。门店编号排序确定边界点和编号归属，输出可复现。每个群以排队中位数最高的核心门店为锚点，同值按门店编号排序。分析失败时回滚输出，楼层运营可对同一份封存数据重试。
@@ -64,7 +71,7 @@ docker compose up -d --build --wait
 | 数据 | MySQL 8.0 存业务实体和审计；Redis 存短时 worker 心跳 |
 | 分析 | 独立 Python worker 从 MySQL 队列取任务，事务内写热区、成员、锚点和运行状态 |
 
-`backend/migrations/001_queue.sql` 定义数据库约束，`backend/src/shift.py` 实现采样和任务流转，`backend/src/density.py` 实现聚类，`backend/scripts/seed_demo.py` 管演示数据。`frontend/src/pages/` 包含九个业务视图，`ui.js` 定义共享组件和显示枚举，`state.js` 管 JWT 会话和请求。角色、点类型、任务状态见 `backend/src/contracts.py`、MySQL `ENUM` 和 `frontend/src/ui.js`。楼层小时状态见 `001_queue.sql`、`shift.py`、`worker.py` 和 `ui.js`。
+`backend/migrations/001_queue.sql` 定义数据库约束，`backend/src/shift.py` 实现采样和任务流转，`backend/src/density.py` 实现聚类，`backend/scripts/seed_demo.py` 管演示数据。`frontend/src/pages/` 包含九个业务视图，`ui.js` 定义共享组件和显示枚举，`state.js` 管 JWT 会话和请求。角色、点类型、任务状态见 `backend/src/contracts.py`、MySQL `ENUM` 和 `frontend/src/ui.js`。楼层小时状态见 `001_queue.sql`、`shift.py`、`worker.py` 和 `ui.js`。搬迁登记见 `005_store_relocation.sql`，归属推导和退回校验见 `backend/src/relocation.py`。
 
 `.env.example` 记录三个端口、数据库口令、JWT 密钥和 seed 开关。容器本地开发可修改源文件后执行 `docker compose up -d --build <service>`，也可在已启动的后端运行 `docker compose exec -T backend python -m scripts.seed_demo`。初始架构由 MySQL 在新卷启动时建立。扩展表由后端在启动时幂等创建。MySQL、Redis 和 worker 共享运行目录分别有命名卷。若本机有其他工程使用相同端口，可在 `.env` 中覆盖。
 

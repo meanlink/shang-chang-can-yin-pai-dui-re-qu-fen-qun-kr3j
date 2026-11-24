@@ -3,13 +3,20 @@ import time
 from pathlib import Path
 
 from .density import map_floor
+from .relocation import locations_at
 from .storage import audit, cache, transaction
 
 
 def analyze(cur, hour_id):
-    cur.execute('SELECT s.* FROM analysis_points p JOIN stores s ON s.id=p.store_id '
+    cur.execute('SELECT hour_start FROM floor_hours WHERE id=%s', (hour_id,))
+    hour_start = cur.fetchone()['hour_start']
+    cur.execute('SELECT s.id,s.code FROM analysis_points p JOIN stores s ON s.id=p.store_id '
                 'WHERE p.hour_id=%s', (hour_id,))
     stores = cur.fetchall()
+    # Retry after a failure still clusters with the coordinates the hour was sealed with.
+    sealed = locations_at(cur, [store['id'] for store in stores], hour_start)
+    for store in stores:
+        store.update(sealed[store['id']])
     cur.execute('SELECT store_id,queue_count FROM observations WHERE hour_id=%s', (hour_id,))
     points, anchors = map_floor(stores, cur.fetchall())
     hotspots = {}

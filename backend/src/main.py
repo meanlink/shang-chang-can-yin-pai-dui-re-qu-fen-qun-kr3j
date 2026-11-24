@@ -12,9 +12,11 @@ from pymysql import IntegrityError, OperationalError
 
 from scripts.seed_demo import seed
 
-from .contracts import Clearance, FloorHourInput, ObservationInput, Role, SignIn, StoreInput
+from . import relocation
+from .contracts import Clearance, FloorHourInput, ObservationInput, RelocationInput, Role, SignIn, StoreInput
 from .extension_routes import router as extension_router
 from .peak_routes import router as peak_router
+from .relocation import roster
 from .security import authenticate, login, permit
 from .shift import confirm_zone, move_task, queue_shift, read_map, record_window
 from .storage import audit, cache, transaction
@@ -89,7 +91,11 @@ def sign_in(data: SignIn):
 def get_stores(floor: int = Query(ge=1, le=4), _user=Depends(authenticate)):
     with transaction() as cur:
         cur.execute('SELECT * FROM stores WHERE floor=%s ORDER BY code', (floor,))
-        return cur.fetchall()
+        stores = cur.fetchall()
+        moves = relocation.for_stores(cur, [store['id'] for store in stores])
+        for store in stores:
+            store['relocations'] = moves.get(store['id'], [])
+        return stores
 
 
 @app.post('/stores', status_code=201)
@@ -107,13 +113,23 @@ def create_store(data: StoreInput, user=Depends(permit(Role.OPERATOR))):
     return {'id': store_id}
 
 
+@app.post('/stores/{store_id}/relocations', status_code=201)
+def relocate_store(store_id: int, data: RelocationInput, user=Depends(permit(Role.OPERATOR))):
+    with transaction() as cur:
+        return relocation.register(cur, store_id, data, user['id'])
+
+
 @app.get('/observations')
 def get_windows(query: Annotated[FloorHourInput, Query()], _user=Depends(authenticate)):
     with transaction() as cur:
         cur.execute('SELECT * FROM floor_hours WHERE floor=%s AND hour_start=%s', (query.floor, query.hour_start))
         hour = cur.fetchone()
-        cur.execute('SELECT id,code,name FROM stores WHERE floor=%s ORDER BY code', (query.floor,))
-        stores = cur.fetchall()
+        stores = []
+        members = roster(cur, query.floor, query.hour_start)
+        if members:
+            marks = ','.join(['%s'] * len(members))
+            cur.execute(f'SELECT id,code,name FROM stores WHERE id IN ({marks}) ORDER BY code', members)
+            stores = cur.fetchall()
         observations = []
         if hour:
             cur.execute('SELECT o.*,u.username FROM observations o JOIN users u ON u.id=o.recorded_by '

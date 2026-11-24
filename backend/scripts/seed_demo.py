@@ -19,6 +19,10 @@ COUNTS = {
     'F3-305': [13, 14, 16, 15], 'F3-306': [20, 22],
     'F3-307': [2, 4, 4, 6], 'F2-208': [11, 12, 13, 12],
 }
+# 晴茶快闪自 14:00 起迁至二层，坐标与疏导点随搬迁生效。
+RELOCATIONS = [
+    ('F3-306', datetime(2026, 11, 21, 14), 2, 44, 30, '二层南梯黄线'),
+]
 
 
 def seed():
@@ -49,6 +53,16 @@ def seed():
                             'VALUES (%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE id=id',
                             [(hour['id'], store['id'], start.replace(minute=index * 15), count, observer)
                              for index, count in enumerate(values)])
+        cur.execute("SELECT id FROM users WHERE username='floorlead'")
+        operator = cur.fetchone()['id']
+        for code, effective, floor, x, y, staging in RELOCATIONS:
+            cur.execute('SELECT id FROM stores WHERE code=%s', (code,))
+            store = cur.fetchone()
+            if not store:
+                continue
+            cur.execute('INSERT INTO store_relocations(store_id,effective_hour,floor,x,y,staging_point,registered_by) '
+                        'VALUES (%s,%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE id=id',
+                        (store['id'], effective, floor, x, y, staging, operator))
         for table in ('users', 'stores', 'floor_hours', 'observations', 'hotspots', 'dispatch_tasks'):
             cur.execute(f'SELECT COUNT(*) AS total FROM {table}')
             print(f"{table}={cur.fetchone()['total']}")

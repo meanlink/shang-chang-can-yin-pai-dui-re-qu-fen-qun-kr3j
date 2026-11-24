@@ -59,6 +59,24 @@ class FloorHourInput(BaseModel):
         return validate_clock(value, 60)
 
 
+class RelocationInput(BaseModel):
+    floor: int = Field(ge=1, le=4)
+    x: int = Field(ge=0, le=120)
+    y: int = Field(ge=0, le=64)
+    staging_point: str = Field(min_length=1, max_length=80)
+    effective_hour: datetime
+
+    @field_validator('staging_point', mode='before')
+    @classmethod
+    def strip_text(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator('effective_hour')
+    @classmethod
+    def hour_boundary(cls, value):
+        return validate_clock(value, 60)
+
+
 class ObservationInput(BaseModel):
     store_id: int = Field(gt=0)
     window_start: datetime

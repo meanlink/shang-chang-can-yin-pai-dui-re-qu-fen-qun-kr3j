@@ -4,6 +4,7 @@ from .contracts import TaskStatus
 from .coverage import record_progress, require_resolved_orders
 from .density import QUEUE_THRESHOLD
 from .lanes import lock_task, require_free_lane
+from .relocation import location_at, locations_at, roster
 from .surge import require_clear as require_clear_surge
 from .storage import audit
 
@@ -16,11 +17,13 @@ def lock_hour(cur, floor, start):
 
 
 def record_window(cur, data, user):
-    cur.execute('SELECT floor FROM stores WHERE id=%s', (data.store_id,))
-    store = cur.fetchone()
-    if not store:
+    # Lock the store before the floor hour, matching relocation and coverage order.
+    cur.execute('SELECT id FROM stores WHERE id=%s FOR UPDATE', (data.store_id,))
+    if not cur.fetchone():
         raise HTTPException(404, '门店不存在')
-    hour = lock_hour(cur, store['floor'], data.window_start.replace(minute=0))
+    # A late window belongs to the floor the store was on when it was measured.
+    spot = location_at(cur, data.store_id, data.window_start)
+    hour = lock_hour(cur, spot['floor'], data.window_start.replace(minute=0))
     if hour['status'] != 'collecting':
         raise HTTPException(409, '本轮分析已封存，无法变更观测窗口')
     cur.execute('SELECT id, queue_count FROM observations WHERE store_id=%s AND window_start=%s',
@@ -49,8 +52,9 @@ def queue_shift(cur, data, user):
     # Freeze the floor roster together with the window data. Stores registered later cannot join this analysis.
     if hour['status'] == 'collecting':
         require_resolved_orders(cur, hour['id'])
-        cur.execute('INSERT INTO analysis_points(hour_id,store_id,windows,kind) '
-                    "SELECT %s,id,0,'insufficient' FROM stores WHERE floor=%s", (hour['id'], data.floor))
+        members = roster(cur, data.floor, data.hour_start)
+        cur.executemany("INSERT INTO analysis_points(hour_id,store_id,windows,kind) VALUES (%s,%s,0,'insufficient')",
+                        [(hour['id'], store_id) for store_id in members])
     cur.execute("UPDATE floor_hours SET status='queued' WHERE id=%s", (hour['id'],))
     audit(cur, user['id'], 'shift.queued', hour['id'])
     return {'id': hour['id'], 'status': 'queued'}
@@ -63,29 +67,39 @@ def read_map(cur, hour_id):
         raise HTTPException(404, '楼层小时不存在')
     if hour['status'] != 'ready':
         return {'hour': hour, 'points': [], 'hotspots': []}
-    cur.execute('SELECT p.*,s.code,s.name,s.x,s.y,h.zone_number FROM analysis_points p '
+    cur.execute('SELECT p.*,s.code,s.name,h.zone_number FROM analysis_points p '
                 'JOIN stores s ON s.id=p.store_id LEFT JOIN hotspots h ON h.id=p.hotspot_id '
                 'WHERE p.hour_id=%s ORDER BY s.code', (hour_id,))
     points = cur.fetchall()
-    cur.execute('SELECT h.*,s.name AS anchor,s.staging_point,t.id AS task_id FROM hotspots h '
+    # Positions and staging points stay as they were when the hour was sealed.
+    sealed = locations_at(cur, [point['store_id'] for point in points], hour['hour_start'])
+    for point in points:
+        point.update(sealed[point['store_id']])
+    cur.execute('SELECT h.*,s.name AS anchor,t.id AS task_id FROM hotspots h '
                 'JOIN stores s ON s.id=h.anchor_store_id LEFT JOIN dispatch_tasks t ON t.hotspot_id=h.id '
                 'WHERE h.hour_id=%s ORDER BY h.zone_number', (hour_id,))
     zones = cur.fetchall()
+    anchors = locations_at(cur, [zone['anchor_store_id'] for zone in zones], hour['hour_start'])
+    for zone in zones:
+        zone['staging_point'] = anchors[zone['anchor_store_id']]['staging_point']
     return {'hour': hour, 'points': points, 'hotspots': zones}
 
 
 def confirm_zone(cur, hotspot_id, user):
-    cur.execute('SELECT h.status,s.staging_point FROM hotspots h JOIN stores s ON s.id=h.anchor_store_id '
-                'WHERE h.id=%s FOR UPDATE', (hotspot_id,))
+    cur.execute('SELECT status,hour_id,anchor_store_id FROM hotspots WHERE id=%s FOR UPDATE', (hotspot_id,))
     hotspot = cur.fetchone()
     if not hotspot:
         raise HTTPException(404, '热区不存在')
     if hotspot['status'] == 'confirmed':
         cur.execute('SELECT id FROM dispatch_tasks WHERE hotspot_id=%s', (hotspot_id,))
         return {'task_id': cur.fetchone()['id'], 'duplicate': True}
+    cur.execute('SELECT hour_start FROM floor_hours WHERE id=%s', (hotspot['hour_id'],))
+    hour_start = cur.fetchone()['hour_start']
+    # Dispatch to the staging point the anchor had when the hour was sealed.
+    staging_point = location_at(cur, hotspot['anchor_store_id'], hour_start)['staging_point']
     cur.execute("UPDATE hotspots SET status='confirmed',confirmed_by=%s WHERE id=%s", (user['id'], hotspot_id))
     cur.execute('INSERT INTO dispatch_tasks(hotspot_id,staging_point,instruction) VALUES (%s,%s,%s)',
-                (hotspot_id, hotspot['staging_point'], '将队尾移至临时等候线，保持主通道畅通并复测队列'))
+                (hotspot_id, staging_point, '将队尾移至临时等候线，保持主通道畅通并复测队列'))
     task_id = cur.lastrowid
     audit(cur, user['id'], 'hotspot.confirmed', hotspot_id)
     audit(cur, user['id'], 'task.assigned', task_id)
